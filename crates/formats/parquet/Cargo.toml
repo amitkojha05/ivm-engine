@@ -1,0 +1,11 @@
+[package]
+name = "ivm-parquet"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ivm-core = { path = "../../core" }
+arrow2 = { version = "0.18", features = ["io_parquet", "io_parquet_compression"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

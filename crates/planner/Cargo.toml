@@ -1,0 +1,13 @@
+[package]
+name = "ivm-planner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ivm-core = { path = "../core" }
+ivm-operators = { path = "../operators" }
+sqlparser = "0.43"
+anyhow.workspace = true
+thiserror = "1"
+
+[dev-dependencies]

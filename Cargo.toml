@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/operators",
+    "crates/planner",
+    "crates/connectors/kafka_cdc",
+    "crates/connectors/pg_wal",
+    "crates/formats/avro",
+    "crates/formats/parquet",
+    "crates/runtime",
+    "crates/api",
+    "examples/word_count",
+    "examples/sql_demo",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Amit Kojha"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"

@@ -1,0 +1,22 @@
+[package]
+name = "word_count"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "word_count"
+path = "src/main.rs"
+
+[features]
+default = []
+kafka = ["ivm-kafka-cdc/kafka"]
+
+[dependencies]
+ivm-core = { path = "../../crates/core" }
+ivm-operators = { path = "../../crates/operators" }
+ivm-kafka-cdc = { path = "../../crates/connectors/kafka_cdc" }
+ivm-runtime = { path = "../../crates/runtime" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

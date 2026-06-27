@@ -1,0 +1,59 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Rows Processed / sec",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(ivm_rows_processed_total[1m])", "legendFormat": "rows/sec" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Kafka Lag",
+      "type": "stat",
+      "targets": [{ "expr": "ivm_kafka_lag_messages" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 3,
+      "title": "Pipelines Running",
+      "type": "stat",
+      "targets": [{ "expr": "ivm_pipelines_running" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+      "id": 4,
+      "title": "Checkpoint Duration p99",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(ivm_checkpoint_duration_seconds_bucket[5m]))"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["ivm"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "IVM Engine",
+  "uid": "ivm-engine",
+  "version": 1
+}

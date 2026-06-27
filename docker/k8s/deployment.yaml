@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ivm-api
+  labels:
+    app: ivm-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ivm-api
+  template:
+    metadata:
+      labels:
+        app: ivm-api
+    spec:
+      containers:
+        - name: ivm-api
+          image: ivm-api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: CHECKPOINT_DIR
+              value: /data/checkpoints
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: PG_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: ivm-secrets
+                  key: pg-conn
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /data/checkpoints
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: ivm-checkpoints
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ivm-api
+spec:
+  selector:
+    app: ivm-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ivm-checkpoints
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: ivm.dev/v1
+kind: IvmPipeline
+metadata:
+  name: word-count
+spec:
+  source:
+    type: kafka
+    brokers: kafka:9092
+    topic: words
+    groupId: ivm-word-count
+  checkpointIntervalSecs: 60
+  operators:
+    - type: filter
+      column: word
+      value: ""
+    - type: aggregate_count
+      keyColumn: word

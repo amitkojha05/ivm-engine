@@ -1,0 +1,72 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ivmpipelines.ivm.dev
+spec:
+  group: ivm.dev
+  scope: Namespaced
+  names:
+    plural: ivmpipelines
+    singular: ivmpipeline
+    kind: IvmPipeline
+    shortNames:
+      - ivmp
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - source
+              properties:
+                source:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum: [kafka, pg_wal]
+                    brokers:
+                      type: string
+                    topic:
+                      type: string
+                    groupId:
+                      type: string
+                    connStr:
+                      type: string
+                    slot:
+                      type: string
+                checkpointIntervalSecs:
+                  type: integer
+                  minimum: 1
+                operators:
+                  type: array
+                  items:
+                    type: object
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Running, Stopped, Failed]
+                lastCheckpointEpoch:
+                  type: integer
+                  format: int64
+                message:
+                  type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Epoch
+          type: integer
+          jsonPath: .status.lastCheckpointEpoch
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

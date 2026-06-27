@@ -1,0 +1,23 @@
+[package]
+name = "ivm-runtime"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+kafka = ["ivm-kafka-cdc/kafka"]
+
+[dependencies]
+ivm-core = { path = "../core" }
+ivm-operators = { path = "../operators" }
+ivm-kafka-cdc = { path = "../connectors/kafka_cdc" }
+ivm-pg-wal = { path = "../connectors/pg_wal" }
+ivm-parquet = { path = "../formats/parquet" }
+ivm-planner = { path = "../planner" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+prometheus = { version = "0.13", features = ["process"] }
+lazy_static = "1"

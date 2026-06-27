@@ -1,0 +1,13 @@
+[package]
+name = "ivm-pg-wal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ivm-core = { path = "../../core" }
+tokio-postgres = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true

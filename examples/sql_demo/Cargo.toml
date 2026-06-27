@@ -1,0 +1,14 @@
+[package]
+name = "sql_demo"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sql_demo"
+path = "src/main.rs"
+
+[dependencies]
+ivm-planner = { path = "../../crates/planner" }
+ivm-core = { path = "../../crates/core" }
+ivm-operators = { path = "../../crates/operators" }
+anyhow.workspace = true

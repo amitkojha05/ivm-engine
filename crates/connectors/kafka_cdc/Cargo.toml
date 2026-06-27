@@ -1,0 +1,18 @@
+[package]
+name = "ivm-kafka-cdc"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+kafka = ["dep:rdkafka", "dep:tokio", "dep:futures"]
+
+[dependencies]
+ivm-core = { path = "../../core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }

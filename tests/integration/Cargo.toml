@@ -1,0 +1,13 @@
+[package]
+name = "ivm-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ivm-core = { path = "../../crates/core" }
+ivm-operators = { path = "../../crates/operators" }
+ivm-kafka-cdc = { path = "../../crates/connectors/kafka_cdc" }
+ivm-parquet = { path = "../../crates/formats/parquet" }
+ivm-runtime = { path = "../../crates/runtime" }
+tempfile = "3"
