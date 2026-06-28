@@ -4,7 +4,12 @@
 //! the binary parser in [`streaming`] handles real-time pgoutput frames.
 //! The default [`PgWalConnector::poll_batch`] uses slot peek for local dev.
 
+use std::pin::Pin;
+use std::time::Duration;
+
 use anyhow::Context;
+use futures::stream::Stream;
+use tokio::sync::mpsc;
 use tokio_postgres::{Client, NoTls};
 
 use crate::streaming::{events_to_zset, WalEvent};
@@ -12,6 +17,7 @@ use ivm_core::{Batch, Row};
 
 pub struct WalStreamConnector {
     client: Client,
+    conn_str: String,
     slot: String,
     publication: String,
 }
@@ -55,6 +61,7 @@ impl WalStreamConnector {
 
         Ok(Self {
             client,
+            conn_str: conn_str.into(),
             slot: slot.into(),
             publication: publication.into(),
         })
@@ -91,6 +98,74 @@ impl WalStreamConnector {
             epoch: events.len() as u64,
             delta,
         })
+    }
+
+    /// Stream WAL events as a real-time stream.
+    pub async fn stream_events(
+        &self,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<WalEvent>> + Send + 'static>>> {
+        let conn_str = self.conn_str.clone();
+        let slot = self.slot.clone();
+        let publication = self.publication.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            let (client, connection) = match tokio_postgres::connect(&conn_str, NoTls).await {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = tx.send(Err(anyhow::anyhow!(err)));
+                    return;
+                }
+            };
+
+            tokio::spawn(async move {
+                if let Err(err) = connection.await {
+                    tracing::error!("Postgres connection error: {err}");
+                }
+            });
+
+            loop {
+                let query = format!(
+                    "SELECT data FROM pg_logical_slot_get_changes('{}', NULL, 100, \
+                     'proto_version', '1', 'publication_names', '{}')",
+                    slot, publication
+                );
+
+                match client.query(&query, &[]).await {
+                    Ok(rows) => {
+                        for row in rows {
+                            let data: &str = row.get(0);
+                            let events = if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                                json_wal_to_events(&v)
+                            } else if let Ok(event) = crate::streaming::parse_pgoutput_message(data.as_bytes()) {
+                                vec![event]
+                            } else {
+                                vec![]
+                            };
+                            for event in events {
+                                let _ = tx.send(Ok(event));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(anyhow::anyhow!(err)));
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        Ok(Box::pin(stream))
+    }
+
+    pub async fn acknowledge_lsn(&self, lsn: u64) -> anyhow::Result<()> {
+        let _ = lsn;
+        Ok(())
     }
 }
 

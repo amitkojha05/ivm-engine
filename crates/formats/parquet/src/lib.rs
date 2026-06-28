@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
-use arrow2::array::{Array, Int64Array, Utf8Array};
-use arrow2::chunk::Chunk;
-use arrow2::datatypes::{DataType, Field, Schema};
-use arrow2::io::parquet::read::{infer_schema, read_metadata, FileReader};
-use arrow2::io::parquet::write::{
-    transverse, CompressionOptions, Encoding, FileWriter, RowGroupIterator, Version, WriteOptions,
-};
+use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use ivm_core::{Row, Value, ZSet};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 
 pub fn write_zset_checkpoint(path: &Path, zset: &ZSet<Row>, epoch: u64) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(path).context("Failed to create checkpoint directory")?;
@@ -26,96 +25,80 @@ pub fn write_zset_checkpoint(path: &Path, zset: &ZSet<Row>, epoch: u64) -> anyho
     }
 
     let row_count = keys.len().max(1);
-    let schema = Schema::from(vec![
+    let schema = Arc::new(Schema::new(vec![
         Field::new("epoch", DataType::Int64, false),
         Field::new("row_json", DataType::Utf8, false),
         Field::new("weight", DataType::Int64, false),
-    ]);
+    ]));
 
-    let epoch_arr = if keys.is_empty() {
-        Int64Array::from_vec(vec![epoch as i64])
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+
+    let file = File::create(&file_path).context("Failed to create parquet checkpoint file")?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
+        .context("Failed to create parquet checkpoint writer")?;
+
+    let epoch_values: Vec<i64> = if keys.is_empty() {
+        vec![epoch as i64]
     } else {
-        Int64Array::from_vec(vec![epoch as i64; row_count])
+        vec![epoch as i64; row_count]
     };
-    let row_arr = if keys.is_empty() {
-        Utf8Array::<i32>::from_iter_values(std::iter::once(""))
+    let row_values: Vec<String> = if keys.is_empty() {
+        vec!["".into()]
     } else {
-        Utf8Array::<i32>::from_iter_values(keys.iter().map(String::as_str))
+        keys
     };
-    let weight_arr = if weights.is_empty() {
-        Int64Array::from_vec(vec![0i64])
+    let weight_values: Vec<i64> = if weights.is_empty() {
+        vec![0i64]
     } else {
-        Int64Array::from_vec(weights)
+        weights
     };
 
-    let chunk = Chunk::new(vec![
-        epoch_arr.boxed(),
-        row_arr.boxed(),
-        weight_arr.boxed(),
-    ]);
-
-    let options = WriteOptions {
-        write_statistics: true,
-        compression: CompressionOptions::Snappy,
-        version: Version::V2,
-        data_pagesize_limit: None,
-    };
-
-    let encodings: Vec<Vec<Encoding>> = schema
-        .fields
-        .iter()
-        .map(|f| transverse(&f.data_type, |_| Encoding::Plain))
-        .collect();
-
-    let file = File::create(&file_path)?;
-    let mut writer = FileWriter::try_new(file, schema.clone(), options)?;
-    let mut row_groups = RowGroupIterator::try_new(
-        vec![Ok(chunk)].into_iter(),
-        &schema,
-        options,
-        encodings,
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(epoch_values)),
+            Arc::new(StringArray::from(row_values)),
+            Arc::new(Int64Array::from(weight_values)),
+        ],
     )?;
 
-    for group in &mut row_groups {
-        writer.write(group?)?;
-    }
-    writer.end(None)?;
+    writer.write(&batch)?;
+    writer.close()?;
 
     Ok(file_path)
 }
 
 pub fn read_zset_checkpoint(path: &Path) -> anyhow::Result<(ZSet<Row>, u64)> {
-    let mut file = File::open(path).context("Failed to open checkpoint file")?;
-    let metadata = read_metadata(&mut file).context("Failed to read parquet metadata")?;
-    let schema = infer_schema(&metadata).context("Failed to infer schema")?;
-    let row_groups = metadata.row_groups.clone();
+    let file = File::open(path).context("Failed to open checkpoint file")?;
+    let mut batch_reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("Failed to build parquet record batch reader")?
+        .build()
+        .context("Failed to build parquet record batch reader")?;
 
-    file.seek(SeekFrom::Start(0))?;
-
-    let reader = FileReader::new(file, row_groups, schema, None, None, None);
     let mut zset = ZSet::default();
     let mut epoch = 0u64;
 
-    for maybe_chunk in reader {
-        let chunk = maybe_chunk.context("Failed to read parquet chunk")?;
-        if chunk.len() == 0 {
-            continue;
-        }
-
-        let epoch_arr = chunk.arrays()[0]
+    while let Some(batch) = batch_reader.next() {
+        let batch = batch.context("Failed to read parquet batch")?;
+        let epoch_arr = batch
+            .column(0)
             .as_any()
             .downcast_ref::<Int64Array>()
             .context("Expected epoch column")?;
-        let row_arr = chunk.arrays()[1]
+        let row_arr = batch
+            .column(1)
             .as_any()
-            .downcast_ref::<Utf8Array<i32>>()
+            .downcast_ref::<StringArray>()
             .context("Expected row_json column")?;
-        let weight_arr = chunk.arrays()[2]
+        let weight_arr = batch
+            .column(2)
             .as_any()
             .downcast_ref::<Int64Array>()
             .context("Expected weight column")?;
 
-        for i in 0..chunk.len() {
+        for i in 0..batch.num_rows() {
             if epoch_arr.is_valid(i) {
                 epoch = epoch_arr.value(i) as u64;
             }
@@ -171,10 +154,15 @@ mod tests {
     use ivm_core::ZSet;
     use std::collections::HashMap;
 
-    #[test]
-    fn checkpoint_roundtrip() {
-        let dir = std::env::temp_dir().join("ivm_parquet_test");
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ivm_parquet_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_single_row() {
+        let dir = temp_dir("single_row");
 
         let mut zset = ZSet::new();
         zset.insert(
@@ -188,6 +176,60 @@ mod tests {
         assert_eq!(restored.len(), 1);
         let row = restored.inner.keys().next().unwrap();
         assert_eq!(row.get_int("id"), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_multiple_rows() {
+        let dir = temp_dir("multiple_rows");
+        let mut zset = ZSet::new();
+        zset.insert(Row(HashMap::from([("id".into(), Value::Int(1))])), 1);
+        zset.insert(Row(HashMap::from([("id".into(), Value::Int(2))])), 1);
+
+        let path = write_zset_checkpoint(&dir, &zset, 42).unwrap();
+        let (restored, epoch) = read_zset_checkpoint(&path).unwrap();
+        assert_eq!(epoch, 42);
+        assert_eq!(restored.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_empty_zset() {
+        let dir = temp_dir("empty_zset");
+        let zset = ZSet::new();
+
+        let path = write_zset_checkpoint(&dir, &zset, 7).unwrap();
+        let (restored, epoch) = read_zset_checkpoint(&path).unwrap();
+        assert_eq!(epoch, 7);
+        assert!(restored.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_checkpoint_selects_highest_epoch() {
+        let dir = temp_dir("latest_epoch");
+        let _ = write_zset_checkpoint(&dir, &ZSet::new(), 1).unwrap();
+        let _ = write_zset_checkpoint(&dir, &ZSet::new(), 9).unwrap();
+        let latest = latest_checkpoint(&dir).unwrap().unwrap();
+        assert!(latest.ends_with("checkpoint_epoch_9.parquet"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_negative_weights() {
+        let dir = temp_dir("negative_weights");
+        let mut zset = ZSet::new();
+        zset.insert(Row(HashMap::from([("id".into(), Value::Int(1))])), -1);
+
+        let path = write_zset_checkpoint(&dir, &zset, 3).unwrap();
+        let (restored, epoch) = read_zset_checkpoint(&path).unwrap();
+        assert_eq!(epoch, 3);
+        let restored_weight = restored.inner.values().next().copied().unwrap();
+        assert_eq!(restored_weight, -1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

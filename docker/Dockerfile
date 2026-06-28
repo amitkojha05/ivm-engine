@@ -11,6 +11,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.toml
 COPY crates ./crates
 COPY examples ./examples
+COPY tests ./tests
 
 RUN cargo build --release -p ivm-api --features kafka
 

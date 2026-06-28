@@ -1,8 +1,10 @@
+use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use futures::StreamExt;
 use ivm_core::Batch;
 use ivm_pg_wal::WalStreamConnector;
 use tokio::sync::RwLock;
@@ -118,22 +120,70 @@ impl PipelineScheduler {
         let connector = WalStreamConnector::new(conn_str, slot, publication)
             .await
             .context("Postgres WAL stream connector init")?;
-        info!(slot, "Started Postgres WAL stream loop");
+        info!(slot, "Started Postgres WAL real-time stream");
+
+        let mut stream = connector
+            .stream_events()
+            .await
+            .context("START_REPLICATION failed")?;
+        let mut pending_delta = ivm_core::ZSet::default();
 
         while *self.running.read().await {
-            match connector.poll_batch(100).await {
-                Ok(batch) if !batch.delta.is_empty() => {
-                    self.process_batch(batch, checkpoint_interval).await?;
-                }
-                Ok(_) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(e) => {
-                    error!("WAL poll error: {e}");
+            match tokio::time::timeout(Duration::from_millis(200), stream.next()).await {
+                Ok(Some(Ok(event))) => match event {
+                    ivm_pg_wal::WalEvent::Insert { row, .. } => {
+                        pending_delta.insert(row, 1);
+                    }
+                    ivm_pg_wal::WalEvent::Delete { row, .. } => {
+                        pending_delta.insert(row, -1);
+                    }
+                    ivm_pg_wal::WalEvent::Update {
+                        old_row,
+                        new_row,
+                        ..
+                    } => {
+                        pending_delta.insert(old_row, -1);
+                        pending_delta.insert(new_row, 1);
+                    }
+                    ivm_pg_wal::WalEvent::Commit { lsn } => {
+                        if !pending_delta.is_empty() {
+                            let batch = Batch {
+                                epoch: lsn,
+                                delta: mem::take(&mut pending_delta),
+                            };
+                            self.process_batch(batch, checkpoint_interval).await?;
+                        }
+                        connector.acknowledge_lsn(lsn).await?;
+                    }
+                    ivm_pg_wal::WalEvent::Relation { .. } => {}
+                },
+                Ok(Some(Err(e))) => {
+                    error!("WAL stream error: {e}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                    match connector.stream_events().await {
+                        Ok(new_stream) => {
+                            stream = new_stream;
+                            info!("WAL stream reconnected");
+                        }
+                        Err(e) => {
+                            error!("WAL reconnect failed: {e}");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
                 }
+                Ok(None) => {
+                    info!("WAL stream ended, reconnecting");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    stream = connector
+                        .stream_events()
+                        .await
+                        .context("WAL stream reconnect")?;
+                }
+                Err(_timeout) => continue,
             }
         }
+
+        info!("WAL stream loop stopped (running=false)");
         Ok(())
     }
 

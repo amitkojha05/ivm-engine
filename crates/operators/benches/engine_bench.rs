@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use ivm_core::{Batch, Row, Value, ZSet};
 use ivm_operators::{filter, incremental_join};
 use std::collections::HashMap;
@@ -24,11 +24,15 @@ fn bench_filter(c: &mut Criterion) {
         let batch = make_batch(size);
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &batch, |b, batch| {
-            b.iter(|| {
-                filter(black_box(batch.clone()), |row| {
-                    matches!(row.0.get("amount"), Some(Value::Int(n)) if *n > 500)
-                })
-            });
+            b.iter_batched(
+                || batch.clone(),
+                |batch| {
+                    filter(black_box(batch), |row| {
+                        matches!(row.0.get("amount"), Some(Value::Int(n)) if *n > 500)
+                    })
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
