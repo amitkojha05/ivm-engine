@@ -125,7 +125,7 @@ impl PipelineScheduler {
         let mut stream = connector
             .stream_events()
             .await
-            .context("START_REPLICATION failed")?;
+            .context("WAL stream init failed")?;
         let mut pending_delta = ivm_core::ZSet::default();
 
         while *self.running.read().await {
