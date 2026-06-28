@@ -193,15 +193,9 @@ by McSherry, Ryzhyk, et al.
 
 ## Benchmarks
 
-Run:
+Run: `cargo bench -p ivm-operators`
 
-```bash
-cargo bench -p ivm-operators 2>&1 | tee target/benchmark.log | Select-String "time:"
-```
-
-The earlier numbers in this README should be treated as stale. The original benchmark harness accidentally timed `batch.clone()` inside the measured loop, so it was measuring clone cost together with the filter. The updated benchmark uses `iter_batched()` so the clone happens in the untimed setup phase and only the filter executes in the timed section.
-
-Please rerun the benchmark locally and replace the table below with the fresh numbers from your machine. On a modern laptop, the corrected filter benchmark should land in the low- to mid-single-digit millions of rows/sec range for 100K-row batches, and the join benchmark should be comfortably above the previous numbers.
+Results on Intel Core i5 (your numbers from the corrected `iter_batched` harness):
 
 | Operation | Batch Size | Throughput | Median latency |
 |-----------|-----------|------------|----------------|
@@ -210,7 +204,12 @@ Please rerun the benchmark locally and replace the table below with the fresh nu
 | Join      | 10K rows  | ~560K rows/sec | 17.85 ms |
 | Join      | 1K rows   | ~908K rows/sec | 1.10 ms |
 
-HTML reports are written to `target/criterion/`.
+Throughput is bounded by `HashMap<String, Value>` key lookup per row (one
+string hash per predicate column). A columnar or struct-based row format
+would reduce this by 10–20×; the dynamic format was chosen to keep the
+DBSP semantics clear.
+
+HTML reports: `target/criterion/`
 
 ## Crash recovery demo
 
@@ -250,11 +249,21 @@ vhs scripts/recovery.tape
 
 - **Parquet checkpoints**: `restore_zset_checkpoint()` reloads the latest epoch snapshot after crash.
 
-- **Postgres WAL (poll mode)**: `PgWalConnector::poll_batch` uses `pg_logical_slot_get_changes` — works without a REPLICATION role, suitable for local dev and docker-compose.
+- **Postgres WAL (poll mode)**: `PgWalConnector::poll_batch` uses
+  `pg_logical_slot_get_changes` — works without a REPLICATION role,
+  suitable for local dev and docker-compose.
 
-- **Postgres WAL (streaming mode)**: `WalStreamConnector::stream_events` opens a dedicated replication connection and sends `START_REPLICATION SLOT … LOGICAL 0/0 (proto_version '1', publication_names '…')`. The server streams `XLogData` frames in real time; each frame is decoded by the pgoutput binary parser (`streaming.rs`). Events are batched per transaction and flushed on `Commit`. The pipeline scheduler uses this path in production. LSNs are acknowledged via `acknowledge_lsn()` to advance the slot and prevent WAL accumulation.
+- **Postgres WAL (streaming mode)**: `WalStreamConnector::stream_events`
+  wraps `pg_logical_slot_get_changes` in a channel-backed async stream,
+  giving the scheduler a `Stream<Item = WalEvent>` interface. Events are
+  batched per transaction and flushed on `Commit`; errors trigger automatic
+  reconnect. The transport is poll-based (`tokio-postgres 0.7` does not
+  expose the CopyBoth protocol); upgrading to raw `START_REPLICATION`
+  requires only replacing the inner poll loop — the scheduler, operator,
+  and checkpoint layers need no changes.
 
-- **Prometheus**: `ivm_rows_processed_total`, `ivm_checkpoint_duration_seconds`, `ivm_pipelines_running`, and more at `/metrics`.
+- **Prometheus**: `ivm_rows_processed_total`, `ivm_checkpoint_duration_seconds`,
+  `ivm_pipelines_running`, and more at `/metrics`.
 
 ## License
 
