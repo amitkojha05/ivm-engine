@@ -13,6 +13,7 @@ where
     Batch {
         epoch: input.epoch,
         delta: out,
+        watermark: input.watermark,
     }
 }
 

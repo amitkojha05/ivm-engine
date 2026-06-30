@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ivm_core::{Row, Value, ZSet};
+use ivm_core::{Batch, Row, Value, ZSet};
 
 pub struct AggregateState {
     pub accumulated: ZSet<Row>,
@@ -68,6 +68,61 @@ impl AggregateState {
     }
 }
 
+pub struct WindowedAggregateState {
+    inner: AggregateState,
+    window_size_ms: u64,
+    pending: Vec<(u64, Row, i64)>,
+    watermark_ms: u64,
+}
+
+impl WindowedAggregateState {
+    pub fn new(inner: AggregateState, window_size_ms: u64) -> Self {
+        Self {
+            inner,
+            window_size_ms,
+            pending: Vec::new(),
+            watermark_ms: 0,
+        }
+    }
+
+    pub fn apply_batch(
+        &mut self,
+        batch: &Batch<Row>,
+        event_time_fn: impl Fn(&Row) -> u64,
+    ) -> ZSet<Row> {
+        for (row, weight) in &batch.delta.inner {
+            let ts = event_time_fn(row);
+            self.pending.push((ts, row.clone(), *weight));
+        }
+
+        if let Some(ref wm) = batch.watermark {
+            self.watermark_ms = self.watermark_ms.max(wm.event_time_ms);
+        }
+
+        let cutoff = self.watermark_ms;
+        let window_size = self.window_size_ms;
+        let mut ready = Vec::new();
+        self.pending.retain(|(ts, row, w)| {
+            if ts + window_size <= cutoff {
+                ready.push((row.clone(), *w));
+                false
+            } else {
+                true
+            }
+        });
+
+        let mut flush_delta = ZSet::default();
+        for (row, w) in ready {
+            flush_delta.insert(row, w);
+        }
+        self.inner.apply_delta(&flush_delta)
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 fn output_row(key: &Value, value: i64) -> Row {
     Row(HashMap::from([
         ("key".into(), key.clone()),
@@ -78,6 +133,7 @@ fn output_row(key: &Value, value: i64) -> Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ivm_core::Watermark;
     use std::collections::HashMap;
 
     fn input_row(key: &str, val: i64) -> Row {
@@ -114,5 +170,26 @@ mod tests {
         delta.insert(input_row("a", 20), 1);
         state.apply_delta(&delta);
         assert_eq!(state.result[&Value::Str("a".into())], 30);
+    }
+
+    #[test]
+    fn windowed_aggregate_closes_on_watermark() {
+        let inner = AggregateState::count("category");
+        let mut state = WindowedAggregateState::new(inner, 60_000);
+
+        let mut delta = ZSet::new();
+        delta.insert(input_row("a", 10), 1);
+        let batch = Batch {
+            epoch: 1,
+            delta,
+            watermark: Some(Watermark {
+                event_time_ms: 120_000,
+                source_id: "test".into(),
+            }),
+        };
+
+        let out = state.apply_batch(&batch, |_| 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(state.pending_count(), 0);
     }
 }

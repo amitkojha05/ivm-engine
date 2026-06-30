@@ -15,7 +15,11 @@ fn make_batch(n: usize) -> Batch<Row> {
             1,
         );
     }
-    Batch { epoch: 1, delta }
+    Batch {
+        epoch: 1,
+        delta,
+        watermark: None,
+    }
 }
 
 fn bench_filter(c: &mut Criterion) {

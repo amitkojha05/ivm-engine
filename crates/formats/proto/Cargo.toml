@@ -1,0 +1,9 @@
+[package]
+name = "ivm-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ivm-core = { path = "../../core" }
+prost-reflect = "0.13"
+anyhow.workspace = true

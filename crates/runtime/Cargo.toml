@@ -12,8 +12,10 @@ ivm-core = { path = "../core" }
 ivm-operators = { path = "../operators" }
 ivm-kafka-cdc = { path = "../connectors/kafka_cdc" }
 ivm-pg-wal = { path = "../connectors/pg_wal" }
+ivm-connectors = { path = "../connectors" }
 ivm-parquet = { path = "../formats/parquet" }
 ivm-planner = { path = "../planner" }
+ivm-snapshot = { path = "../connectors/snapshot" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

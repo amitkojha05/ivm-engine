@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// A Z-set: map from T → weight (integer).
 /// Positive weight = inserted rows, negative = deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZSet<T: Eq + std::hash::Hash> {
-    pub inner: HashMap<T, i64>,
+    pub inner: IndexMap<T, i64>,
 }
 
 impl<T: Eq + std::hash::Hash> Default for ZSet<T> {
     fn default() -> Self {
         Self {
-            inner: HashMap::new(),
+            inner: IndexMap::new(),
         }
     }
 }
@@ -23,12 +24,12 @@ impl<T: Eq + std::hash::Hash> ZSet<T> {
     }
 
     pub fn insert(&mut self, row: T, weight: i64) {
-        use std::collections::hash_map::Entry;
+        use indexmap::map::Entry;
         match self.inner.entry(row) {
             Entry::Occupied(mut e) => {
                 *e.get_mut() += weight;
                 if *e.get() == 0 {
-                    e.remove();
+                    e.shift_remove();
                 }
             }
             Entry::Vacant(e) => {
@@ -55,23 +56,41 @@ impl<T: Eq + std::hash::Hash> ZSet<T> {
     }
 }
 
+/// Optional event-time watermark for a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watermark {
+    pub event_time_ms: u64,
+    pub source_id: String,
+}
+
 /// A timestamped batch of Z-set changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Batch<T: Eq + std::hash::Hash> {
     pub epoch: u64,
     pub delta: ZSet<T>,
+    pub watermark: Option<Watermark>,
 }
 
 impl<T: Eq + std::hash::Hash> Batch<T> {
     pub fn new(epoch: u64, delta: ZSet<T>) -> Self {
-        Self { epoch, delta }
+        Self {
+            epoch,
+            delta,
+            watermark: None,
+        }
     }
 
     pub fn empty(epoch: u64) -> Self {
         Self {
             epoch,
             delta: ZSet::default(),
+            watermark: None,
         }
+    }
+
+    pub fn with_watermark(mut self, wm: Watermark) -> Self {
+        self.watermark = Some(wm);
+        self
     }
 }
 
@@ -171,5 +190,6 @@ mod tests {
         let batch = Batch::new(42, delta);
         assert_eq!(batch.epoch, 42);
         assert_eq!(batch.delta.len(), 1);
+        assert!(batch.watermark.is_none());
     }
 }

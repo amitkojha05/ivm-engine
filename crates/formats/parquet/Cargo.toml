@@ -5,9 +5,11 @@ edition.workspace = true
 
 [dependencies]
 ivm-core = { path = "../../core" }
+ivm-connectors = { path = "../../connectors" }
 parquet = { version = "48", features = ["arrow", "snap"] }
 arrow-array = "48"
 arrow-schema = "48"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+tokio.workspace = true

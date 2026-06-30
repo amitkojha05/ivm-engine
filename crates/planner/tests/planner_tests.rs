@@ -55,6 +55,7 @@ fn test_execute_filter() {
         Batch {
             epoch: 1,
             delta,
+            watermark: None,
         },
     )]);
     let mut agg_state = HashMap::new();

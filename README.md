@@ -262,8 +262,58 @@ vhs scripts/recovery.tape
   requires only replacing the inner poll loop — the scheduler, operator,
   and checkpoint layers need no changes.
 
-- **Prometheus**: `ivm_rows_processed_total`, `ivm_checkpoint_duration_seconds`,
-  `ivm_pipelines_running`, and more at `/metrics`.
+- **Prometheus**: per-pipeline labeled metrics (`ivm_rows_processed_total`, `ivm_backpressure_events_total`, `ivm_dead_letters_total`, and more) at `/metrics`.
+
+## Roadmap: Apache Iceberg Connector (Phase 2)
+
+Apache Iceberg is the second table format in Feldera's connector scope.
+Design is complete below; implementation is planned as the next connector
+after Delta Lake (see `crates/connectors/delta_lake`, currently a v0
+version-polling skeleton).
+
+### Architecture
+
+```
+catalog -> namespace -> table -> snapshots -> manifest_list -> manifests -> Parquet files
+```
+
+### CDC via snapshot diff
+
+Each new Iceberg snapshot lists added and removed data files relative to
+the prior snapshot. Comparing consecutive snapshots gives a file-level
+diff that maps directly onto the Z-set model used throughout this engine:
+
+```
+snapshot N:    files [A, B, C]
+snapshot N+1:  files [A, B, D]      (C removed, D added)
+
+delta = rows_in(D) at weight +1
+      + rows_in(C) at weight -1
+```
+
+### Planned implementation steps
+
+1. Manifest parsing — read `manifest-list.avro`, then each manifest file
+2. Snapshot discovery — poll catalog metadata (REST/Hive/Glue) on an interval
+3. Schema evolution — map Iceberg field IDs to stable Z-set column names
+   (field IDs survive renames; column names do not)
+4. Partition pruning — skip manifest entries outside the configured filter
+5. Incremental tracking — persist `iceberg_snapshot_id` in `ConnectorState`
+   (the field already exists — see `crates/connectors/src/connector_state.rs`)
+
+## Connector Capability Matrix
+
+| Connector          | CDC               | Ordering            | Checkpoint | Recovery        | Delivery       | Status        |
+|---------------------|--------------------|-----------------------|-------------|-------------------|-----------------|----------------|
+| Kafka (Debezium)    | Yes                | Per-partition offset | Parquet     | Offset replay     | At-least-once   | Built          |
+| PostgreSQL WAL      | Yes                | LSN (global)          | Parquet     | LSN replay        | At-least-once   | Built          |
+| Postgres snapshot+CDC | Yes (bootstrap)  | LSN at slot creation  | Parquet     | Slot-anchored     | Exactly-once*   | Built          |
+| Delta Lake          | Yes (version diff) | Table version          | Parquet     | Version replay    | Exactly-once    | v0 (full rescan)|
+| Apache Iceberg      | Planned (snapshot diff) | Snapshot ID       | Planned     | Planned           | Exactly-once    | Phase 2 design |
+
+\* Exactly-once for the snapshot-to-WAL handoff specifically — no gap, no
+duplication across the boundary. End-to-end exactly-once additionally
+depends on idempotent sink writes, which is a separate guarantee.
 
 ## License
 

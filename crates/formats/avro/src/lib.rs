@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use apache_avro::types::Value as AvroValue;
+use dashmap::DashMap;
 use ivm_core::{Row, Value};
 
 /// Decode an Avro-encoded payload into a Row using a JSON schema string.
@@ -64,10 +66,11 @@ fn row_to_avro_value(row: &Row, schema: &apache_avro::Schema) -> Result<AvroValu
     Ok(AvroValue::Record(fields))
 }
 
-/// Schema Registry client wrapper for fetching subject schemas.
+/// Schema Registry client with Confluent wire-format schema ID caching.
 pub struct SchemaRegistry {
     url: String,
     client: reqwest::Client,
+    schema_cache: Arc<DashMap<u32, Arc<apache_avro::Schema>>>,
 }
 
 impl SchemaRegistry {
@@ -75,6 +78,7 @@ impl SchemaRegistry {
         Self {
             url: url.into(),
             client: reqwest::Client::new(),
+            schema_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -95,22 +99,50 @@ impl SchemaRegistry {
             .context("Missing schema field in registry response")
     }
 
+    pub async fn decode_confluent(&self, payload: &[u8]) -> Result<Row> {
+        if payload.len() < 5 || payload[0] != 0x00 {
+            anyhow::bail!("Not a Confluent-encoded Avro message");
+        }
+        let schema_id = u32::from_be_bytes(payload[1..5].try_into()?);
+        let avro_payload = &payload[5..];
+
+        let schema = if let Some(s) = self.schema_cache.get(&schema_id) {
+            s.clone()
+        } else {
+            let url = format!("{}/schemas/ids/{}", self.url, schema_id);
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .context("Schema registry request failed")?
+                .json::<serde_json::Value>()
+                .await
+                .context("Failed to parse schema registry response")?;
+            let schema_str = resp["schema"]
+                .as_str()
+                .context("Missing schema field")?;
+            let schema = Arc::new(apache_avro::Schema::parse_str(schema_str)?);
+            self.schema_cache.insert(schema_id, schema.clone());
+            tracing::debug!(schema_id, "Avro schema cached from registry");
+            schema
+        };
+
+        let value = apache_avro::from_avro_datum(&schema, &mut &avro_payload[..], None)?;
+        avro_value_to_row(&value)
+    }
+
     pub async fn decode_with_registry(
         &self,
         subject: &str,
         payload: &[u8],
     ) -> Result<Row> {
-        let schema_json = self.fetch_schema(subject).await?;
-        decode_avro(strip_confluent_header(payload), &schema_json)
-    }
-}
-
-/// Confluent wire format: magic byte + 4-byte schema ID + Avro payload.
-fn strip_confluent_header(payload: &[u8]) -> &[u8] {
-    if payload.len() > 5 && payload[0] == 0 {
-        &payload[5..]
-    } else {
-        payload
+        if payload.len() > 5 && payload[0] == 0 {
+            self.decode_confluent(payload).await
+        } else {
+            let schema_json = self.fetch_schema(subject).await?;
+            decode_avro(payload, &schema_json)
+        }
     }
 }
 

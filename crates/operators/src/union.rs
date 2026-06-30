@@ -4,7 +4,11 @@ pub fn union(a: Batch<Row>, b: Batch<Row>) -> Batch<Row> {
     let epoch = a.epoch.max(b.epoch);
     let mut out = a.delta;
     out.merge(b.delta);
-    Batch { epoch, delta: out }
+    Batch {
+        epoch,
+        delta: out,
+        watermark: a.watermark.or(b.watermark),
+    }
 }
 
 #[cfg(test)]

@@ -101,7 +101,11 @@ pub async fn sql_execute(
                     .collect();
                 delta.insert(Row(fields), row.weight);
             }
-            (name, Batch { epoch: batch.epoch, delta })
+            (name, Batch {
+                epoch: batch.epoch,
+                delta,
+                watermark: None,
+            })
         })
         .collect();
 

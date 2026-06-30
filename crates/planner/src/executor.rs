@@ -15,6 +15,7 @@ pub fn execute(
         LogicalPlan::Scan { table } => sources.get(table).cloned().unwrap_or_else(|| Batch {
             epoch: 0,
             delta: ZSet::default(),
+            watermark: None,
         }),
 
         LogicalPlan::Filter { input, predicate } => {
@@ -80,6 +81,7 @@ pub fn execute(
             Batch {
                 epoch: batch.epoch,
                 delta: out_delta,
+                watermark: batch.watermark,
             }
         }
 

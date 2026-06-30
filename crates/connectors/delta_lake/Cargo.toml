@@ -1,14 +1,12 @@
 [package]
-name = "ivm-avro"
+name = "ivm-delta-lake"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 ivm-core = { path = "../../core" }
-apache-avro = "0.16"
-serde.workspace = true
-serde_json.workspace = true
+ivm-connectors = { path = ".." }
 anyhow.workspace = true
+async-trait = "0.1"
+tokio.workspace = true
 tracing.workspace = true
-reqwest = { version = "0.12", features = ["json"] }
-dashmap = "5"

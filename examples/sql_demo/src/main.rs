@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
             Batch {
                 epoch: 1,
                 delta,
+                watermark: None,
             },
         )]);
 

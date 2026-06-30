@@ -42,6 +42,15 @@ pub enum OperatorKind {
     Join { key_column: String },
 }
 
+impl PipelineConfig {
+    pub fn bootstrap_table(&self) -> String {
+        match &self.source {
+            SourceKind::PgWal { .. } => "orders".into(),
+            SourceKind::Kafka { topic, .. } => topic.clone(),
+        }
+    }
+}
+
 pub struct Pipeline {
     pub config: PipelineConfig,
     pub aggregate: Option<AggregateState>,
@@ -134,6 +143,7 @@ impl Pipeline {
                         Batch {
                             epoch: current.epoch,
                             delta: out_delta,
+                            watermark: current.watermark,
                         }
                     } else {
                         current
@@ -155,7 +165,11 @@ impl Pipeline {
     ) -> Batch<Row> {
         if let Some(ref mut join) = self.join {
             let delta = join.apply_delta(left, right);
-            Batch { epoch, delta }
+            Batch {
+                epoch,
+                delta,
+                watermark: None,
+            }
         } else {
             Batch::empty(epoch)
         }

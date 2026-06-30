@@ -4,10 +4,24 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[features]
+default = []
+kafka-it = ["ivm-kafka-cdc/kafka", "dep:rdkafka"]
+
 [dependencies]
 ivm-core = { path = "../../crates/core" }
 ivm-operators = { path = "../../crates/operators" }
 ivm-kafka-cdc = { path = "../../crates/connectors/kafka_cdc" }
+ivm-pg-wal = { path = "../../crates/connectors/pg_wal" }
+ivm-connectors = { path = "../../crates/connectors" }
+ivm-snapshot = { path = "../../crates/connectors/snapshot" }
 ivm-parquet = { path = "../../crates/formats/parquet" }
 ivm-runtime = { path = "../../crates/runtime" }
 tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
+
+[dev-dependencies]
+testcontainers = "0.15"
+testcontainers-modules = { version = "0.3", features = ["kafka", "postgres"] }
+tokio-postgres = "0.7"

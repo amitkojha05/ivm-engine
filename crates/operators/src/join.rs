@@ -20,10 +20,15 @@ impl JoinState {
     /// Incremental join: Δ(A ⋈ B) = ΔA ⋈ B_old + A_old ⋈ ΔB + ΔA ⋈ ΔB
     pub fn apply_delta(&mut self, left_delta: &ZSet<Row>, right_delta: &ZSet<Row>) -> ZSet<Row> {
         let mut out = ZSet::default();
+        let join_key = self.join_key;
 
-        self.join_sets(left_delta, &self.right_history, &mut out);
-        self.join_sets(&self.left_history, right_delta, &mut out);
-        self.join_sets(left_delta, right_delta, &mut out);
+        let right_hist_idx = Self::build_index(&self.right_history, join_key);
+        let left_hist_idx = Self::build_index(&self.left_history, join_key);
+        let right_delta_idx = Self::build_index(right_delta, join_key);
+
+        Self::probe(left_delta, &right_hist_idx, join_key, &mut out);
+        Self::probe_left_index(&left_hist_idx, right_delta, join_key, &mut out);
+        Self::probe(left_delta, &right_delta_idx, join_key, &mut out);
 
         self.left_history.merge(left_delta.clone());
         self.right_history.merge(right_delta.clone());
@@ -31,19 +36,43 @@ impl JoinState {
         out
     }
 
-    fn join_sets(&self, left: &ZSet<Row>, right: &ZSet<Row>, out: &mut ZSet<Row>) {
-        let mut right_idx: HashMap<Value, Vec<(Row, i64)>> = HashMap::new();
-        for (row, w) in &right.inner {
-            right_idx
-                .entry((self.join_key)(row))
-                .or_default()
-                .push((row.clone(), *w));
+    fn build_index(
+        zset: &ZSet<Row>,
+        key_fn: fn(&Row) -> Value,
+    ) -> HashMap<Value, Vec<(Row, i64)>> {
+        let mut idx: HashMap<Value, Vec<(Row, i64)>> = HashMap::with_capacity(zset.len());
+        for (row, w) in &zset.inner {
+            idx.entry(key_fn(row)).or_default().push((row.clone(), *w));
         }
+        idx
+    }
 
+    fn probe(
+        left: &ZSet<Row>,
+        right_idx: &HashMap<Value, Vec<(Row, i64)>>,
+        join_key: fn(&Row) -> Value,
+        out: &mut ZSet<Row>,
+    ) {
         for (lrow, lw) in &left.inner {
-            let key = (self.join_key)(lrow);
-            if let Some(matches) = right_idx.get(&key) {
+            if let Some(matches) = right_idx.get(&join_key(lrow)) {
                 for (rrow, rw) in matches {
+                    let mut merged = lrow.0.clone();
+                    merged.extend(rrow.0.clone());
+                    out.insert(Row(merged), lw * rw);
+                }
+            }
+        }
+    }
+
+    fn probe_left_index(
+        left_idx: &HashMap<Value, Vec<(Row, i64)>>,
+        right: &ZSet<Row>,
+        join_key: fn(&Row) -> Value,
+        out: &mut ZSet<Row>,
+    ) {
+        for (rrow, rw) in &right.inner {
+            if let Some(matches) = left_idx.get(&join_key(rrow)) {
+                for (lrow, lw) in matches {
                     let mut merged = lrow.0.clone();
                     merged.extend(rrow.0.clone());
                     out.insert(Row(merged), lw * rw);
@@ -82,6 +111,7 @@ pub fn incremental_join(
     ivm_core::Batch {
         epoch: left.epoch.max(right.epoch),
         delta: out,
+        watermark: left.watermark.clone().or(right.watermark.clone()),
     }
 }
 

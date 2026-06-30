@@ -13,6 +13,8 @@
 //! underlying transport.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -21,6 +23,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::{Client, NoTls};
 
 use crate::streaming::{events_to_zset, WalEvent};
+use ivm_connectors::{ConnectorState, DeliverySemantics, InputConnector};
 use ivm_core::{Batch, Row};
 
 pub struct WalStreamConnector {
@@ -28,6 +31,7 @@ pub struct WalStreamConnector {
     conn_str: String,
     slot: String,
     publication: String,
+    confirmed_lsn: Arc<AtomicU64>,
 }
 
 impl WalStreamConnector {
@@ -72,7 +76,12 @@ impl WalStreamConnector {
             conn_str: conn_str.into(),
             slot: slot.into(),
             publication: publication.into(),
+            confirmed_lsn: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    pub fn slot(&self) -> &str {
+        &self.slot
     }
 
     /// Poll WAL changes and decode into structured events.
@@ -88,11 +97,7 @@ impl WalStreamConnector {
 
         for row in rows {
             let data: &str = row.get(0);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                events.extend(json_wal_to_events(&v));
-            } else if let Ok(event) = crate::streaming::parse_pgoutput_message(data.as_bytes()) {
-                events.push(event);
-            }
+            events.extend(crate::streaming::parse_wal_data(data));
         }
 
         Ok(events)
@@ -105,29 +110,19 @@ impl WalStreamConnector {
         Ok(Batch {
             epoch: events.len() as u64,
             delta,
+            watermark: None,
         })
     }
 
     /// Stream WAL events as an async stream.
-    ///
-    /// Internally polls `pg_logical_slot_get_changes` every 100 ms and
-    /// forwards decoded events over an unbounded channel, presenting a
-    /// `Stream` interface to the caller. The scheduler drives this with a
-    /// 200 ms timeout loop, batches events per transaction, and flushes on
-    /// `Commit` — matching how a push-based replication stream would behave.
-    ///
-    /// Upgrading to raw `START_REPLICATION` streaming (CopyBoth protocol)
-    /// is straightforward once `tokio-postgres` exposes that API or the
-    /// dependency is switched to the `postgres` crate with its `replication`
-    /// feature; the scheduler, operator, and checkpoint layers need no
-    /// changes.
     pub async fn stream_events(
         &self,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<WalEvent>> + Send + 'static>>> {
         let conn_str = self.conn_str.clone();
         let slot = self.slot.clone();
         let publication = self.publication.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        const CHANNEL_CAPACITY: usize = 10_000;
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
             let (client, connection) = match tokio_postgres::connect(&conn_str, NoTls).await {
@@ -155,18 +150,10 @@ impl WalStreamConnector {
                     Ok(rows) => {
                         for row in rows {
                             let data: &str = row.get(0);
-                            let events =
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                    json_wal_to_events(&v)
-                                } else if let Ok(event) =
-                                    crate::streaming::parse_pgoutput_message(data.as_bytes())
-                                {
-                                    vec![event]
-                                } else {
-                                    vec![]
-                                };
-                            for event in events {
-                                let _ = tx.send(Ok(event));
+                            for event in crate::streaming::parse_wal_data(data) {
+                                if tx.send(Ok(event)).await.is_err() {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -186,34 +173,52 @@ impl WalStreamConnector {
         Ok(Box::pin(stream))
     }
 
-    /// Acknowledge a processed LSN.
-    ///
-    /// With `pg_logical_slot_get_changes` the slot automatically advances as
-    /// rows are consumed, so explicit LSN acknowledgement is a no-op here.
-    /// A raw `START_REPLICATION` implementation would send a
-    /// `StandbyStatusUpdate` message to the server at this point.
+    /// Advance the replication slot so Postgres can reclaim WAL.
     pub async fn acknowledge_lsn(&self, lsn: u64) -> anyhow::Result<()> {
-        let _ = lsn;
+        let prev = self.confirmed_lsn.load(Ordering::Relaxed);
+        if lsn <= prev {
+            return Ok(());
+        }
+
+        let lsn_str = format!("{}/{}", lsn >> 32, lsn & 0xFFFF_FFFF);
+
+        self.client
+            .execute(
+                "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
+                &[&self.slot, &lsn_str],
+            )
+            .await
+            .context("Failed to advance replication slot LSN")?;
+
+        self.confirmed_lsn.store(lsn, Ordering::Relaxed);
+        tracing::debug!(slot = %self.slot, lsn = lsn_str, "LSN acknowledged");
         Ok(())
     }
 }
 
-fn json_wal_to_events(v: &serde_json::Value) -> Vec<WalEvent> {
-    let op = v["action"].as_str().unwrap_or("I");
-    match op {
-        "I" => vec![WalEvent::Insert {
-            relation: "unknown".into(),
-            row: crate::json_to_row(&v["columns"]),
-        }],
-        "D" => vec![WalEvent::Delete {
-            relation: "unknown".into(),
-            row: crate::json_to_row(&v["identity"]),
-        }],
-        "U" => vec![WalEvent::Update {
-            relation: "unknown".into(),
-            old_row: crate::json_to_row(&v["identity"]),
-            new_row: crate::json_to_row(&v["columns"]),
-        }],
-        _ => vec![],
+#[async_trait::async_trait]
+impl InputConnector for WalStreamConnector {
+    async fn poll_batch(&self, max_rows: usize) -> anyhow::Result<Batch<Row>> {
+        self.poll_batch(max_rows as i32).await
+    }
+
+    async fn commit(&self, epoch: u64) -> anyhow::Result<()> {
+        self.acknowledge_lsn(epoch).await
+    }
+
+    fn connector_id(&self) -> &str {
+        &self.slot
+    }
+
+    fn delivery_semantics(&self) -> DeliverySemantics {
+        DeliverySemantics::AtLeastOnce
+    }
+
+    fn connector_state(&self, checkpoint_epoch: u64) -> ConnectorState {
+        ConnectorState {
+            postgres_lsn: Some(self.confirmed_lsn.load(Ordering::Relaxed)),
+            checkpoint_epoch,
+            ..Default::default()
+        }
     }
 }

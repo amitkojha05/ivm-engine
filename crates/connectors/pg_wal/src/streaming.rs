@@ -25,12 +25,61 @@ pub enum WalEvent {
     },
     Commit {
         lsn: u64,
+        commit_time_ms: u64,
     },
     Relation {
         oid: u32,
         name: String,
         columns: Vec<String>,
     },
+}
+
+/// Parse a WAL data string (JSON or pgoutput binary) into WalEvents.
+/// Single source of truth — used by both poll and streaming connectors.
+pub fn parse_wal_data(data: &str) -> Vec<WalEvent> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+        json_wal_to_events(&v)
+    } else if let Ok(event) = parse_pgoutput_message(data.as_bytes()) {
+        vec![event]
+    } else {
+        vec![]
+    }
+}
+
+fn json_wal_to_events(v: &serde_json::Value) -> Vec<WalEvent> {
+    let op = v["action"].as_str().unwrap_or("");
+    match op {
+        "I" => vec![WalEvent::Insert {
+            relation: v["schema"].as_str().unwrap_or("unknown").to_string()
+                + "."
+                + v["table"].as_str().unwrap_or("unknown"),
+            row: crate::json_to_row(&v["columns"]),
+        }],
+        "D" => vec![WalEvent::Delete {
+            relation: "unknown".into(),
+            row: crate::json_to_row(&v["identity"]),
+        }],
+        "U" => vec![WalEvent::Update {
+            relation: "unknown".into(),
+            old_row: crate::json_to_row(&v["identity"]),
+            new_row: crate::json_to_row(&v["columns"]),
+        }],
+        "B" => vec![],
+        "C" => {
+            let lsn = v["nextlsn"]
+                .as_str()
+                .and_then(|s| {
+                    u64::from_str_radix(s.replace('/', "").trim_start_matches('0'), 16).ok()
+                })
+                .unwrap_or(0);
+            let commit_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            vec![WalEvent::Commit { lsn, commit_time_ms }]
+        }
+        _ => vec![],
+    }
 }
 
 /// Convert WAL events into a Z-set delta.
@@ -100,7 +149,17 @@ pub fn parse_pgoutput_message(data: &[u8]) -> anyhow::Result<WalEvent> {
                 anyhow::bail!("commit message too short");
             }
             let lsn = u64::from_be_bytes(data[9..17].try_into()?);
-            Ok(WalEvent::Commit { lsn })
+            let commit_time_ms = if data.len() >= 25 {
+                let pg_micros = i64::from_be_bytes(data[17..25].try_into()?);
+                const PG_EPOCH_OFFSET_MS: i64 = 946_684_800_000;
+                ((pg_micros / 1000) + PG_EPOCH_OFFSET_MS).max(0) as u64
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            };
+            Ok(WalEvent::Commit { lsn, commit_time_ms })
         }
         b'R' => {
             if data.len() < 7 {

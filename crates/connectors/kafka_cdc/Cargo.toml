@@ -9,10 +9,12 @@ kafka = ["dep:rdkafka", "dep:tokio", "dep:futures"]
 
 [dependencies]
 ivm-core = { path = "../../core" }
+ivm-connectors = { path = ".." }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+async-trait = "0.1"
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 tokio = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }

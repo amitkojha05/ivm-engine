@@ -1,0 +1,13 @@
+[package]
+name = "ivm-connectors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ivm-core = { path = "../core" }
+anyhow.workspace = true
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+hex = "0.4"

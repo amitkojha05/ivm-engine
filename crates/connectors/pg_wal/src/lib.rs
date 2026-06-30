@@ -84,7 +84,11 @@ impl PgWalConnector {
             epoch = i as u64 + 1;
         }
 
-        Ok(Batch { epoch, delta })
+        Ok(Batch {
+            epoch,
+            delta,
+            watermark: None,
+        })
     }
 
     pub async fn ensure_publication(&self, tables: &[&str]) -> anyhow::Result<()> {
@@ -102,18 +106,13 @@ impl PgWalConnector {
 }
 
 pub fn apply_wal_change(data: &str, delta: &mut ZSet<Row>) {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-        let op = v["action"].as_str().unwrap_or("I");
-        match op {
-            "I" => {
-                delta.insert(json_to_row(&v["columns"]), 1);
-            }
-            "D" => {
-                delta.insert(json_to_row(&v["identity"]), -1);
-            }
-            "U" => {
-                delta.insert(json_to_row(&v["identity"]), -1);
-                delta.insert(json_to_row(&v["columns"]), 1);
+    for event in crate::streaming::parse_wal_data(data) {
+        match event {
+            WalEvent::Insert { row, .. } => delta.insert(row, 1),
+            WalEvent::Delete { row, .. } => delta.insert(row, -1),
+            WalEvent::Update { old_row, new_row, .. } => {
+                delta.insert(old_row, -1);
+                delta.insert(new_row, 1);
             }
             _ => {}
         }

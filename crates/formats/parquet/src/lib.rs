@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use ivm_connectors::ConnectorState;
 use ivm_core::{Row, Value, ZSet};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -16,6 +17,21 @@ pub fn write_zset_checkpoint(path: &Path, zset: &ZSet<Row>, epoch: u64) -> anyho
     std::fs::create_dir_all(path).context("Failed to create checkpoint directory")?;
 
     let file_path = path.join(format!("checkpoint_epoch_{epoch}.parquet"));
+    write_zset_checkpoint_to_path(&file_path, zset, epoch, None)?;
+    Ok(file_path)
+}
+
+/// Write a checkpoint to an explicit file path (used for two-phase `.tmp` writes).
+pub fn write_zset_checkpoint_to_path(
+    file_path: &Path,
+    zset: &ZSet<Row>,
+    epoch: u64,
+    connector_state: Option<&ConnectorState>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create checkpoint directory")?;
+    }
+
     let mut keys: Vec<String> = Vec::new();
     let mut weights: Vec<i64> = Vec::new();
 
@@ -31,11 +47,23 @@ pub fn write_zset_checkpoint(path: &Path, zset: &ZSet<Row>, epoch: u64) -> anyho
         Field::new("weight", DataType::Int64, false),
     ]));
 
-    let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .build();
+    let mut props_builder = WriterProperties::builder().set_compression(Compression::SNAPPY);
+    if let Some(state) = connector_state {
+        let state_json = serde_json::to_string(state)?;
+        props_builder = props_builder.set_key_value_metadata(Some(vec![
+            parquet::file::metadata::KeyValue::new(
+                "connector_state".to_string(),
+                Some(state_json),
+            ),
+            parquet::file::metadata::KeyValue::new(
+                "ivm_version".to_string(),
+                Some("1".to_string()),
+            ),
+        ]));
+    }
+    let props = props_builder.build();
 
-    let file = File::create(&file_path).context("Failed to create parquet checkpoint file")?;
+    let file = File::create(file_path).context("Failed to create parquet checkpoint file")?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .context("Failed to create parquet checkpoint writer")?;
 
@@ -67,7 +95,37 @@ pub fn write_zset_checkpoint(path: &Path, zset: &ZSet<Row>, epoch: u64) -> anyho
     writer.write(&batch)?;
     writer.close()?;
 
+    Ok(file_path.to_path_buf())
+}
+
+/// Write checkpoint with connector state embedded in Parquet metadata.
+pub fn write_checkpoint_with_state(
+    path: &Path,
+    zset: &ZSet<Row>,
+    epoch: u64,
+    state: &ConnectorState,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(path).context("Failed to create checkpoint directory")?;
+    let file_path = path.join(format!("checkpoint_epoch_{epoch}.parquet"));
+    write_zset_checkpoint_to_path(&file_path, zset, epoch, Some(state))?;
     Ok(file_path)
+}
+
+pub fn read_connector_state(path: &Path) -> anyhow::Result<Option<ConnectorState>> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let meta = builder.metadata().file_metadata();
+    if let Some(kv_list) = meta.key_value_metadata() {
+        for kv in kv_list {
+            if kv.key == "connector_state" {
+                if let Some(ref val) = kv.value {
+                    let state: ConnectorState = serde_json::from_str(val)?;
+                    return Ok(Some(state));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn read_zset_checkpoint(path: &Path) -> anyhow::Result<(ZSet<Row>, u64)> {
@@ -146,6 +204,54 @@ pub fn restore_zset_checkpoint(dir: impl AsRef<Path>) -> anyhow::Result<(ZSet<Ro
         anyhow::anyhow!("no checkpoint files found in {}", dir.display())
     })?;
     read_zset_checkpoint(&path)
+}
+
+/// Read rows from an arbitrary Parquet data file (Delta Lake data files, etc.).
+pub async fn read_arbitrary_parquet_as_rows(path: &Path) -> anyhow::Result<Vec<Row>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_parquet_rows_sync(&path))
+        .await
+        .context("Parquet read task failed")?
+}
+
+fn read_parquet_rows_sync(path: &Path) -> anyhow::Result<Vec<Row>> {
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let file = File::open(path).context("Failed to open parquet file")?;
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+        .build()
+        .context("Failed to build parquet reader")?;
+
+    let mut rows = Vec::new();
+    while let Some(batch) = reader.next() {
+        let batch = batch.context("Failed to read parquet batch")?;
+        let schema = batch.schema();
+        for row_idx in 0..batch.num_rows() {
+            let mut map = HashMap::new();
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let col = batch.column(col_idx);
+                let value = if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                    if arr.is_valid(row_idx) {
+                        Value::Str(arr.value(row_idx).to_string())
+                    } else {
+                        Value::Null
+                    }
+                } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                    if arr.is_valid(row_idx) {
+                        Value::Int(arr.value(row_idx))
+                    } else {
+                        Value::Null
+                    }
+                } else {
+                    Value::Null
+                };
+                map.insert(field.name().clone(), value);
+            }
+            rows.push(Row(map));
+        }
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]

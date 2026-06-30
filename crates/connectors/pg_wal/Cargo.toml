@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 ivm-core = { path = "../../core" }
+ivm-connectors = { path = ".." }
 tokio-postgres = "0.7"
 serde.workspace = true
 serde_json.workspace = true
@@ -12,3 +13,4 @@ anyhow.workspace = true
 futures.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+async-trait = "0.1"

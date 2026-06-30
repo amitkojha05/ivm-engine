@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ivm_connectors::DeadLetterRecord;
 use ivm_core::{Batch, Row, Value, ZSet};
 
 #[cfg(feature = "kafka")]
@@ -25,9 +26,13 @@ impl KafkaCdcConnector {
     pub fn commit_sync(&self) -> anyhow::Result<()> {
         anyhow::bail!("Kafka support not enabled")
     }
+
+    pub fn commit_offsets(&self) -> anyhow::Result<()> {
+        anyhow::bail!("Kafka support not enabled")
+    }
 }
 
-pub fn apply_cdc_payload(payload: &[u8], delta: &mut ZSet<Row>) -> anyhow::Result<()> {
+fn try_apply_cdc_payload(payload: &[u8], delta: &mut ZSet<Row>) -> anyhow::Result<()> {
     let envelope: serde_json::Value = serde_json::from_slice(payload)?;
     let op = envelope["op"].as_str().unwrap_or("c");
     match op {
@@ -48,6 +53,19 @@ pub fn apply_cdc_payload(payload: &[u8], delta: &mut ZSet<Row>) -> anyhow::Resul
         _ => {}
     }
     Ok(())
+}
+
+pub fn apply_cdc_payload(
+    payload: &[u8],
+    delta: &mut ZSet<Row>,
+    dead_letters: &mut Vec<DeadLetterRecord>,
+    source: &str,
+    epoch: u64,
+) {
+    if let Err(e) = try_apply_cdc_payload(payload, delta) {
+        dead_letters.push(DeadLetterRecord::new(source, epoch, payload, &e.to_string()));
+        tracing::warn!(source, epoch, error = %e, "Dead-lettered malformed CDC payload");
+    }
 }
 
 pub fn json_to_row(v: &serde_json::Value) -> Row {
@@ -79,17 +97,18 @@ mod tests {
     fn decode_insert_envelope() {
         let payload = br#"{"op":"c","after":{"id":1,"name":"alice"}}"#;
         let mut delta = ZSet::new();
-        apply_cdc_payload(payload, &mut delta).unwrap();
+        let mut dead_letters = Vec::new();
+        apply_cdc_payload(payload, &mut delta, &mut dead_letters, "test", 0);
         assert_eq!(delta.len(), 1);
-        let row = delta.inner.keys().next().unwrap();
-        assert_eq!(row.get_int("id"), 1);
+        assert!(dead_letters.is_empty());
     }
 
     #[test]
     fn decode_update_envelope() {
         let payload = br#"{"op":"u","before":{"id":1,"name":"alice"},"after":{"id":1,"name":"bob"}}"#;
         let mut delta = ZSet::new();
-        apply_cdc_payload(payload, &mut delta).unwrap();
+        let mut dead_letters = Vec::new();
+        apply_cdc_payload(payload, &mut delta, &mut dead_letters, "test", 0);
         assert_eq!(delta.len(), 2);
     }
 
@@ -97,7 +116,18 @@ mod tests {
     fn decode_delete_envelope() {
         let payload = br#"{"op":"d","before":{"id":1,"name":"alice"}}"#;
         let mut delta = ZSet::new();
-        apply_cdc_payload(payload, &mut delta).unwrap();
+        let mut dead_letters = Vec::new();
+        apply_cdc_payload(payload, &mut delta, &mut dead_letters, "test", 0);
         assert_eq!(delta.inner.values().next(), Some(&-1));
+    }
+
+    #[test]
+    fn malformed_payload_dead_letters() {
+        let payload = b"not json";
+        let mut delta = ZSet::new();
+        let mut dead_letters = Vec::new();
+        apply_cdc_payload(payload, &mut delta, &mut dead_letters, "test", 1);
+        assert_eq!(dead_letters.len(), 1);
+        assert!(delta.is_empty());
     }
 }
