@@ -1,4 +1,4 @@
-mod checkpoint;
+pub mod checkpoint;
 mod metrics;
 mod pipeline;
 mod scheduler;
